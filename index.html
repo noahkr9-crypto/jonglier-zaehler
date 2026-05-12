@@ -1,0 +1,52 @@
+<button id="start">Start</button>
+<button id="reset">Reset</button>
+<h1 id="count">0</h1>
+<input id="sensitivity" type="range" min="20" max="200" value="80">
+
+<script>
+let count = 0;
+let lastHit = 0;
+let running = false;
+
+document.getElementById("reset").onclick = () => {
+  count = 0;
+  document.getElementById("count").textContent = count;
+};
+
+document.getElementById("start").onclick = async () => {
+  if (running) return;
+  running = true;
+
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const audioCtx = new AudioContext();
+  const source = audioCtx.createMediaStreamSource(stream);
+  const analyser = audioCtx.createAnalyser();
+
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+
+  const data = new Uint8Array(analyser.frequencyBinCount);
+
+  function loop() {
+    analyser.getByteTimeDomainData(data);
+
+    let peak = 0;
+    for (const v of data) {
+      peak = Math.max(peak, Math.abs(v - 128));
+    }
+
+    const threshold = Number(document.getElementById("sensitivity").value);
+    const now = Date.now();
+
+    if (peak > threshold && now - lastHit > 250) {
+      count++;
+      lastHit = now;
+      document.getElementById("count").textContent = count;
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  loop();
+};
+</script>
