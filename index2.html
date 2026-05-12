@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jonglier-Zähler</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0b0b0f;
+      color: white;
+      text-align: center;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 110px;
+      margin: 20px 0;
+    }
+
+    button {
+      font-size: 21px;
+      padding: 15px 24px;
+      margin: 7px;
+      border: 0;
+      border-radius: 14px;
+      font-weight: 700;
+    }
+
+    .start { background: #34c759; }
+    .stop { background: #ff453a; }
+    .reset { background: #ffd60a; }
+
+    .box {
+      margin: 18px auto;
+      max-width: 420px;
+      background: #1c1c22;
+      padding: 16px;
+      border-radius: 18px;
+    }
+
+    input {
+      width: 90%;
+    }
+
+    .small {
+      color: #aaa;
+      font-size: 14px;
+    }
+
+    .meter {
+      height: 18px;
+      background: #333;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+
+    .bar {
+      height: 100%;
+      width: 0%;
+      background: white;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>⚽ Jonglier-Zähler</h2>
+  <h1 id="count">0</h1>
+
+  <button class="start" id="start">Start</button>
+  <button class="stop" id="stop">Stop</button>
+  <button class="reset" id="reset">Reset</button>
+
+  <div class="box">
+    <p>Empfindlichkeit</p>
+    <input id="sensitivity" type="range" min="1" max="100" value="28">
+    <p id="sensText">28</p>
+
+    <p>Mindestabstand zwischen Treffern</p>
+    <input id="cooldown" type="range" min="120" max="500" value="230">
+    <p id="coolText">230 ms</p>
+  </div>
+
+  <div class="box">
+    <p>Live-Signal</p>
+    <div class="meter"><div class="bar" id="bar"></div></div>
+    <p class="small" id="status">Bereit</p>
+  </div>
+
+  <p class="small">
+    Tipp: Handy 1–2 Meter entfernt seitlich hinlegen. Erst 3 Sekunden ruhig bleiben, dann jonglieren.
+  </p>
+
+<script>
+let count = 0;
+let running = false;
+let stream = null;
+let audioCtx = null;
+
+let lastHitTime = 0;
+let noiseFloor = 0.01;
+let lastEnergy = 0;
+let calibrationUntil = 0;
+
+const countEl = document.getElementById("count");
+const statusEl = document.getElementById("status");
+const barEl = document.getElementById("bar");
+const sensitivityEl = document.getElementById("sensitivity");
+const cooldownEl = document.getElementById("cooldown");
+const sensText = document.getElementById("sensText");
+const coolText = document.getElementById("coolText");
+
+sensitivityEl.oninput = () => sensText.textContent = sensitivityEl.value;
+cooldownEl.oninput = () => coolText.textContent = cooldownEl.value + " ms";
+
+document.getElementById("reset").onclick = () => {
+  count = 0;
+  countEl.textContent = count;
+};
+
+document.getElementById("stop").onclick = () => stopApp();
+
+document.getElementById("start").onclick = async () => {
+  if (running) return;
+
+  running = true;
+  count = 0;
+  countEl.textContent = count;
+  statusEl.textContent = "Kalibriere Hintergrundgeräusche...";
+
+  calibrationUntil = performance.now() + 3000;
+  noiseFloor = 0.01;
+  lastEnergy = 0;
+
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    }
+  });
+
+  audioCtx = new AudioContext();
+
+  const source = audioCtx.createMediaStreamSource(stream);
+
+  const highpass = audioCtx.createBiquadFilter();
+  highpass.type = "highpass";
+  highpass.frequency.value = 700;
+
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.15;
+
+  source.connect(highpass);
+  highpass.connect(analyser);
+
+  const timeData = new Uint8Array(analyser.fftSize);
+  const freqData = new Uint8Array(analyser.frequencyBinCount);
+
+  function loop() {
+    if (!running) return;
+
+    analyser.getByteTimeDomainData(timeData);
+    analyser.getByteFrequencyData(freqData);
+
+    let energy = 0;
+    let peak = 0;
+
+    for (let i = 0; i < timeData.length; i++) {
+      const v = (timeData[i] - 128) / 128;
+      energy += v * v;
+      peak = Math.max(peak, Math.abs(v));
+    }
+
+    energy = Math.sqrt(energy / timeData.length);
+
+    let highEnergy = 0;
+    let lowEnergy = 0;
+
+    for (let i = 0; i < freqData.length; i++) {
+      const value = freqData[i] / 255;
+
+      if (i < freqData.length * 0.18) {
+        lowEnergy += value;
+      } else {
+        highEnergy += value;
+      }
+    }
+
+    const highRatio = highEnergy / Math.max(lowEnergy + highEnergy, 0.0001);
+    const attack = energy - lastEnergy;
+    lastEnergy = energy;
+
+    const now = performance.now();
+
+    if (now < calibrationUntil) {
+      noiseFloor = noiseFloor * 0.95 + energy * 0.05;
+      barEl.style.width = Math.min(100, energy * 600) + "%";
+      requestAnimationFrame(loop);
+      return;
+    }
+
+    const sensitivity = Number(sensitivityEl.value);
+    const cooldown = Number(cooldownEl.value);
+
+    const dynamicThreshold = noiseFloor * (1.4 + sensitivity / 35);
+
+    const isSharp = attack > dynamicThreshold * 0.35;
+    const isLoudEnough = energy > dynamicThreshold;
+    const isBrightEnough = highRatio > 0.48;
+    const isNotTooSoon = now - lastHitTime > cooldown;
+
+    const score =
+      energy * 80 +
+      attack * 180 +
+      highRatio * 35;
+
+    barEl.style.width = Math.min(100, score) + "%";
+
+    if (isSharp && isLoudEnough && isBrightEnough && isNotTooSoon) {
+      count++;
+      countEl.textContent = count;
+      lastHitTime = now;
+      statusEl.textContent = "Treffer erkannt";
+
+      if (navigator.vibrate) navigator.vibrate(25);
+    } else {
+      statusEl.textContent =
+        "Signal: " + score.toFixed(1) +
+        " | Hell: " + Math.round(highRatio * 100) + "%";
+    }
+
+    noiseFloor = noiseFloor * 0.995 + energy * 0.005;
+
+    requestAnimationFrame(loop);
+  }
+
+  loop();
+};
+
+function stopApp() {
+  running = false;
+  statusEl.textContent = "Gestoppt";
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+}
+</script>
+</body>
+</html>
